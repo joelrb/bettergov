@@ -1,6 +1,70 @@
 import { Env } from '../types';
 import { fetchAndSaveContent, setDefaultCrawler } from '../lib/crawler';
 
+// Maximum request size limits (in bytes)
+const MAX_REQUEST_SIZE = 1024 * 1024; // 1MB limit
+
+/**
+ * Validate request size to prevent DoS attacks
+ * @param request The incoming request
+ * @returns Response if size limit exceeded, null if valid
+ */
+function validateRequestSize(request: Request): Response | null {
+  const contentLength = request.headers.get('Content-Length');
+
+  if (contentLength) {
+    const size = parseInt(contentLength);
+    if (size > MAX_REQUEST_SIZE) {
+      return new Response(
+        JSON.stringify({
+          error: 'Request too large',
+          message: `Maximum request size is ${MAX_REQUEST_SIZE / 1024 / 1024}MB`,
+        }),
+        {
+          status: 413,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': isCorsOriginAllowed(origin)
+              ? origin
+              : 'null',
+          },
+        }
+      );
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Validate CORS origin to prevent unauthorized cross-origin requests
+ * @param origin The origin header value
+ * @returns Whether the origin is allowed
+ */
+function isCorsOriginAllowed(origin: string | null): boolean {
+  if (!origin) return false;
+
+  const allowedOrigins = [
+    'https://bettergov.ph',
+    'https://*.bettergov.ph',
+    'http://localhost:3000',
+    'http://localhost:8787',
+    'http://localhost:5173',
+  ];
+
+  // Check exact matches
+  if (allowedOrigins.includes(origin)) {
+    return true;
+  }
+
+  // Check wildcard subdomains
+  if (origin.endsWith('.bettergov.ph')) {
+    return true;
+  }
+
+  return false;
+}
+
 /**
  * Handler for HTTP requests to the web crawling endpoint
  * This is a generic interface for crawling web content, currently using Jina.ai
@@ -12,20 +76,47 @@ export async function onRequest(context: {
 }): Promise<Response> {
   const { request, env } = context;
 
+  // Validate request size first
+  const sizeValidation = validateRequestSize(request);
+  if (sizeValidation) {
+    return sizeValidation;
+  }
+
+  // Handle CORS origin validation
+  const origin = request.headers.get('Origin');
+  const isPreflight = request.method === 'OPTIONS';
+
+  const corsHeaders: Record<string, string> = {
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+  };
+
+  // Set appropriate origin based on validation
+  if (isCorsOriginAllowed(origin)) {
+    corsHeaders['Access-Control-Allow-Origin'] = origin;
+  } else if (isPreflight) {
+    // For preflight requests without valid origin, allow no origin
+    corsHeaders['Access-Control-Allow-Origin'] = 'null';
+  }
+
   // Handle CORS preflight requests
-  if (request.method === 'OPTIONS') {
+  if (isPreflight) {
     return new Response(null, {
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-      },
+      status: 204,
+      headers: corsHeaders,
     });
   }
 
   // Only allow GET requests
   if (request.method !== 'GET') {
-    return new Response('Method not allowed', { status: 405 });
+    return new Response('Method not allowed', {
+      status: 405,
+      headers: {
+        'Access-Control-Allow-Origin': isCorsOriginAllowed(origin)
+          ? origin
+          : 'null',
+      },
+    });
   }
 
   try {
@@ -54,7 +145,9 @@ export async function onRequest(context: {
           status: 400,
           headers: {
             'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Origin': isCorsOriginAllowed(origin)
+              ? origin
+              : 'null',
           },
         }
       );
@@ -75,7 +168,9 @@ export async function onRequest(context: {
             status: 500,
             headers: {
               'Content-Type': 'application/json',
-              'Access-Control-Allow-Origin': '*',
+              'Access-Control-Allow-Origin': isCorsOriginAllowed(origin)
+                ? origin
+                : 'null',
             },
           }
         );
@@ -90,7 +185,9 @@ export async function onRequest(context: {
         {
           headers: {
             'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Origin': isCorsOriginAllowed(origin)
+              ? origin
+              : 'null',
           },
         }
       );
@@ -105,7 +202,9 @@ export async function onRequest(context: {
         status: 500,
         headers: {
           'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Origin': isCorsOriginAllowed(origin)
+            ? origin
+            : 'null',
         },
       }
     );

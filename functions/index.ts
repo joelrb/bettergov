@@ -12,6 +12,67 @@ import { onRequest as weatherKVRequest } from './weather';
 import { onRequest as forexKVRequest } from './forex';
 import { Env } from './types';
 
+// Maximum request size limits (in bytes)
+const MAX_REQUEST_SIZE = 1024 * 1024; // 1MB limit
+
+/**
+ * Validate request size to prevent DoS attacks
+ * @param request The incoming request
+ * @returns Response if size limit exceeded, null if valid
+ */
+function validateRequestSize(request: Request): Response | null {
+  const contentLength = request.headers.get('Content-Length');
+
+  if (contentLength) {
+    const size = parseInt(contentLength);
+    if (size > MAX_REQUEST_SIZE) {
+      return new Response(
+        JSON.stringify({
+          error: 'Request too large',
+          message: `Maximum request size is ${MAX_REQUEST_SIZE / 1024 / 1024}MB`,
+        }),
+        {
+          status: 413,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Validate CORS origin to prevent unauthorized cross-origin requests
+ * @param origin The origin header value
+ * @returns Whether the origin is allowed
+ */
+function isCorsOriginAllowed(origin: string | null): boolean {
+  if (!origin) return false;
+
+  const allowedOrigins = [
+    'https://bettergov.ph',
+    'https://*.bettergov.ph',
+    'http://localhost:3000',
+    'http://localhost:8787',
+    'http://localhost:5173',
+  ];
+
+  // Check exact matches
+  if (allowedOrigins.includes(origin)) {
+    return true;
+  }
+
+  // Check wildcard subdomains
+  if (origin.endsWith('.bettergov.ph')) {
+    return true;
+  }
+
+  return false;
+}
+
 // Export the scheduled handlers
 export { scheduled as scheduled_getWeather } from './api/weather';
 export { scheduled as scheduled_getForex } from './api/forex';
@@ -36,16 +97,33 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // Add CORS headers to all responses
+    // Validate request size first
+    const sizeValidation = validateRequestSize(request);
+    if (sizeValidation) {
+      return sizeValidation;
+    }
+
+    // Handle CORS headers with origin validation
+    const origin = request.headers.get('Origin');
+    const isPreflight = request.method === 'OPTIONS';
+
     const corsHeaders: Record<string, string> = {
-      'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
     };
 
+    // Set appropriate origin based on validation
+    if (isCorsOriginAllowed(origin)) {
+      corsHeaders['Access-Control-Allow-Origin'] = origin;
+    } else if (isPreflight) {
+      // For preflight requests without valid origin, allow no origin
+      corsHeaders['Access-Control-Allow-Origin'] = 'null';
+    }
+
     // Handle OPTIONS requests for CORS
-    if (request.method === 'OPTIONS') {
+    if (isPreflight) {
       return new Response(null, {
+        status: 204,
         headers: corsHeaders,
       });
     }
@@ -195,7 +273,8 @@ export default {
                 {
                   name: 'url',
                   required: true,
-                  description: 'URL to fetch content from',
+                  description:
+                    'URL to fetch content from (must be .gov.ph domain)',
                 },
                 {
                   name: 'update',
