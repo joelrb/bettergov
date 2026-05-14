@@ -46,6 +46,7 @@ export default {
     // Handle OPTIONS requests for CORS
     if (request.method === 'OPTIONS') {
       return new Response(null, {
+        status: 204,
         headers: corsHeaders,
       });
     }
