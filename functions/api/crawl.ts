@@ -2,6 +2,92 @@ import { Env } from '../types';
 import { fetchAndSaveContent, setDefaultCrawler } from '../lib/crawler';
 
 /**
+ * Validate URL to prevent SSRF and other attacks
+ * @param url The URL to validate
+ * @returns Whether the URL is valid
+ */
+function isValidUrl(url: string): boolean {
+  try {
+    const parsedUrl = new URL(url);
+    
+    // Only allow HTTP/HTTPS protocols
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      return false;
+    }
+    
+    // Prevent localhost and private networks
+    const hostname = parsedUrl.hostname;
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0') {
+      return false;
+    }
+    
+    // Prevent IP addresses (only allow domain names)
+    if (/^(\d{1,3}\.){3}\d{1,3}$/.test(hostname)) {
+      return false;
+    }
+    
+    // Only allow .gov.ph domains for government services
+    if (!hostname.endsWith('.gov.ph')) {
+      return false;
+    }
+    
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Simple rate limiting using KV storage
+ * @param env Environment variables
+ * @param clientIP Client IP address
+ * @returns Whether request is allowed
+ */
+async function checkRateLimit(env: Env, clientIP: string): Promise<boolean> {
+  const rateLimitKey = `rate_limit:${clientIP}`;
+  const now = Date.now();
+  const windowMs = 60 * 1000; // 1 minute window
+  const maxRequests = 10; // Max 10 requests per minute
+  
+  try {
+    const kv = env.BROWSER_KV;
+    const existing = await kv.get(rateLimitKey);
+    
+    if (!existing) {
+      // First request from this IP
+      await kv.put(rateLimitKey, JSON.stringify({
+        count: 1,
+        resetTime: now + windowMs,
+      }), { expirationTtl: Math.ceil(windowMs / 1000) });
+      return true;
+    }
+    
+    const data = JSON.parse(existing);
+    
+    if (now > data.resetTime) {
+      // Window expired, reset
+      await kv.put(rateLimitKey, JSON.stringify({
+        count: 1,
+        resetTime: now + windowMs,
+      }), { expirationTtl: Math.ceil(windowMs / 1000) });
+      return true;
+    }
+    
+    if (data.count >= maxRequests) {
+      return false; // Rate limited
+    }
+    
+    // Increment count
+    data.count++;
+    await kv.put(rateLimitKey, JSON.stringify(data));
+    return true;
+  } catch (error) {
+    console.error('Rate limit check failed:', error);
+    return true; // Allow request if rate limit fails
+  }
+}
+
+/**
  * Handler for HTTP requests to the web crawling endpoint
  * This is a generic interface for crawling web content, currently using Jina.ai
  */
@@ -55,6 +141,44 @@ export async function onRequest(context: {
           headers: {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
+          },
+        }
+      );
+    }
+
+    // Validate URL before processing
+    if (!isValidUrl(targetUrl)) {
+      return new Response(
+        JSON.stringify({
+          error: 'Invalid URL',
+          message: 'Only .gov.ph domains are allowed for crawling',
+        }),
+        {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+          },
+        }
+      );
+    }
+
+    // Check rate limit
+    const clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rateLimitAllowed = await checkRateLimit(env, clientIP);
+    
+    if (!rateLimitAllowed) {
+      return new Response(
+        JSON.stringify({
+          error: 'Rate limit exceeded',
+          message: 'Maximum 10 requests per minute per IP address',
+        }),
+        {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+            'Retry-After': '60', // Retry after 60 seconds
           },
         }
       );
